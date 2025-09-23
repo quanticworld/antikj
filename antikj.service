@@ -1,0 +1,17 @@
+[Unit]
+Description=AntikJ Intrusion Watcher
+After=graphical.target network.target
+
+[Service]
+StandardOutput=journal
+StandardError=journal
+Type=simple
+WorkingDirectory=/home/USERNAME/github/antikj
+ExecStart=/home/USERNAME/github/antikj/.antikj-venv/bin/python /home/USERNAME/github/antikj/antikj.py
+Restart=on-failure
+EnvironmentFile=/home/USERNAME/.config/antikj.env
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/USERNAME/.Xauthority
+
+[Install]
+WantedBy=default.target
